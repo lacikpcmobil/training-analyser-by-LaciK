@@ -603,23 +603,49 @@ async function connectICU(){
   setSt('icu-st','ld','Connecting to intervals.icu…');
   const oldest=new Date(); oldest.setDate(oldest.getDate()-90);
   const o=oldest.toISOString().split('T')[0], n=new Date().toISOString().split('T')[0];
-  try{
-    const res=await fetch(`https://intervals.icu/api/v1/athlete/${id}/activities?oldest=${o}&newest=${n}`,{headers:{Authorization:`Basic ${btoa('API_KEY:'+key)}`}});
-    if(res.status===401)throw new Error('Invalid credentials — check your athlete ID and API key');
-    if(!res.ok)throw new Error(`intervals.icu returned ${res.status}`);
-    const data=await res.json();
-    if(!Array.isArray(data)||!data.length)throw new Error('No activities found in the last 90 days');
-    D.acts=data.map(a=>({
-      date:new Date(a.start_date_local||a.start_date),
-      sport:mapSport(a.type||a.sport_type||''),
-      duration:(a.moving_time||a.elapsed_time||0)/60,
-      distance:(a.distance||0)/1000,
-      hr:a.average_heartrate||0, maxHR:a.max_heartrate||0,
-      calories:a.calories||0, title:a.name||''
-    }));
-    D.src='icu'; D.parsed=true;
-    build(); setSt('icu-st','ok',`${data.length} activities synced from intervals.icu`);
-  }catch(e){setSt('icu-st','er',e.message);}
+  const auth=btoa('API_KEY:'+key);
+  const icuUrl=`https://intervals.icu/api/v1/athlete/${id}/activities?oldest=${o}&newest=${n}`;
+
+  // Try direct first, then fall back through CORS proxies
+  const attempts=[
+    ()=>fetch(icuUrl,{headers:{Authorization:`Basic ${auth}`}}),
+    ()=>fetch(`https://corsproxy.io/?${encodeURIComponent(icuUrl)}`,{headers:{Authorization:`Basic ${auth}`,'x-cors-api-key':'temp_demo'}}),
+    ()=>fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(icuUrl)}`,{headers:{Authorization:`Basic ${auth}`}}),
+    ()=>fetch(`https://thingproxy.freeboard.io/fetch/${icuUrl}`,{headers:{Authorization:`Basic ${auth}`}}),
+  ];
+
+  let lastErr='Could not reach intervals.icu — check your credentials and try again';
+  for(const attempt of attempts){
+    try{
+      setSt('icu-st','ld','Connecting to intervals.icu…');
+      const res=await attempt();
+      if(res.status===401){lastErr='Invalid credentials — double-check your Athlete ID and API key';break;}
+      if(res.status===403){lastErr='Access denied — make sure your API key has read access';break;}
+      if(!res.ok){lastErr=`Server returned ${res.status} — try again in a moment`;continue;}
+      const text=await res.text();
+      let data;
+      try{data=JSON.parse(text);}catch(e){lastErr='Unexpected response from server';continue;}
+      // allorigins wraps in {contents:'...'}
+      if(data&&data.contents) try{data=JSON.parse(data.contents);}catch(e){}
+      if(!Array.isArray(data)){lastErr='Unexpected data format from intervals.icu';continue;}
+      if(!data.length){lastErr='No activities found in the last 90 days';break;}
+      D.acts=data.map(a=>({
+        date:new Date(a.start_date_local||a.start_date),
+        sport:mapSport(a.type||a.sport_type||''),
+        duration:(a.moving_time||a.elapsed_time||0)/60,
+        distance:(a.distance||0)/1000,
+        hr:a.average_heartrate||0, maxHR:a.max_heartrate||0,
+        calories:a.calories||0, title:a.name||''
+      }));
+      D.src='icu'; D.parsed=true;
+      build(); setSt('icu-st','ok',`✓ ${data.length} activities synced from intervals.icu`);
+      btn.disabled=false; return;
+    }catch(e){
+      lastErr=e.message||'Connection failed';
+      continue;
+    }
+  }
+  setSt('icu-st','er',lastErr);
   btn.disabled=false;
 }
 
